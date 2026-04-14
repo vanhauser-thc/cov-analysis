@@ -69,6 +69,12 @@ cd /path/to/project-cov/
 afl-cov -d /path/to/afl-fuzz-output/ -e "./cov @@"
 ```
 
+To replay coverage with multiple workers, add `-t`:
+
+```bash
+afl-cov -d /path/to/afl-fuzz-output/ -e "./cov @@" -t 8
+```
+
 `afl-cov` will:
 1. Replay all `queue/id:*` files in batch (fast)
 2. Replay `crashes/id:*` and `timeouts/id:*` one-by-one with a timeout
@@ -111,6 +117,7 @@ Required:
 
 Optional:
   -o <dir>           Report output directory (default: <afl-dir>/cov)
+  -t <num>           Parallel replay workers/forks (default: 1)
   -T <secs>          Timeout for crash/timeout replay (default: 5)
   --ignore-regex <r> Filename regex to exclude from llvm-cov reports
                      (default: /usr/include/)

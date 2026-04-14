@@ -24,6 +24,7 @@ AFL_DIR=""
 COVERAGE_CMD=""
 REPORT_DIR=""
 TIMEOUT=5
+FORKS=1
 VERBOSE=0
 QUIET=0
 IGNORE_REGEX='/usr/include/'
@@ -48,6 +49,7 @@ Required:
 
 Optional:
   -o <dir>           Report output directory (default: <afl-dir>/cov)
+  -t <num>           Parallel replay workers/forks (default: 1)
   -T <secs>          Timeout in seconds for crash/timeout replay (default: 5)
   --ignore-regex <r> Filename regex to exclude from llvm-cov reports
                      (default: /usr/include/)
@@ -62,6 +64,9 @@ Examples:
 
   # With env vars, custom report dir, 10s timeout
   afl-cov -d out -e "LD_LIBRARY_PATH=./lib ./cov @@" -o coverage -T 10
+
+  # Replay coverage with 8 parallel workers
+  afl-cov -d out -e "./cov @@" -t 8
 
   # stdin input (binary reads from stdin)
   afl-cov -d out -e "./cov"
@@ -128,6 +133,7 @@ while [ $# -gt 0 ]; do
     -d)            AFL_DIR="$2";       shift 2 ;;
     -e)            COVERAGE_CMD="$2";  shift 2 ;;
     -o)            REPORT_DIR="$2";    shift 2 ;;
+    -t)            FORKS="$2";         shift 2 ;;
     -T)            TIMEOUT="$2";       shift 2 ;;
     -v)            VERBOSE=1;          shift   ;;
     -q)            QUIET=1;            shift   ;;
@@ -152,6 +158,12 @@ if ! test -d "$AFL_DIR"; then
   err "AFL directory does not exist: $AFL_DIR"
   exit 1
 fi
+case "$FORKS" in
+  ''|*[!0-9]*|0)
+    err "Replay worker count must be a positive integer: $FORKS"
+    exit 1
+    ;;
+esac
 
 COV_BINARY="$(extract_binary "$COVERAGE_CMD")"
 if test -z "$COV_BINARY"; then
@@ -189,6 +201,7 @@ export LLVM_PROFILE_FILE="$PROFRAW_DIR/cov-%p.profraw"
 
 log "AFL directory  : $AFL_DIR"
 log "Report directory: $REPORT_DIR"
+log "Replay workers : $FORKS"
 logv "Profraw temp dir: $PROFRAW_DIR"
 
 # ── replay queue files ────────────────────────────────────────────────────────
@@ -203,25 +216,30 @@ if echo "$COVERAGE_CMD" | grep -q '@@'; then
     # Fast batch: strip trailing @@ and let xargs append all files at once.
     # sh -c handles env assignments (e.g. LD_LIBRARY_PATH=./lib ./cov) correctly.
     CMD_NO_AT="${COVERAGE_CMD% @@}"
-    logv "Queue replay: batch (xargs)"
+    logv "Queue replay: batch (xargs, workers=$FORKS)"
     # shellcheck disable=SC2016
-    find_queue_files | xargs -0 sh -c "${CMD_NO_AT}"' "$@"' -- >/dev/null 2>&1 || true
+    find_queue_files | xargs -0 -r -n 128 -P "$FORKS" \
+      sh -c "${CMD_NO_AT}"' "$@"' -- >/dev/null 2>&1 || true
   else
     # @@ is embedded mid-command (e.g. "./cov -f @@ -extra") — loop mode
-    logv "Queue replay: loop (mid-command @@)"
-    while IFS= read -r -d '' f; do
-      logv "  $f"
-      CMD="${COVERAGE_CMD/@@/$f}"
-      sh -c "$CMD" >/dev/null 2>&1 || true
-    done < <(find_queue_files)
+    logv "Queue replay: loop (mid-command @@, workers=$FORKS)"
+    find_queue_files | xargs -0 -r -n 1 -P "$FORKS" \
+      bash -c '
+        coverage_cmd="$1"
+        f="$2"
+        cmd="${coverage_cmd/@@/$f}"
+        sh -c "$cmd" >/dev/null 2>&1 || true
+      ' _ "$COVERAGE_CMD"
   fi
 else
   # No @@ — feed each file via stdin
-  logv "Queue replay: stdin loop"
-  while IFS= read -r -d '' f; do
-    logv "  $f"
-    sh -c "$COVERAGE_CMD" < "$f" >/dev/null 2>&1 || true
-  done < <(find_queue_files)
+  logv "Queue replay: stdin loop (workers=$FORKS)"
+  find_queue_files | xargs -0 -r -n 1 -P "$FORKS" \
+    bash -c '
+      coverage_cmd="$1"
+      f="$2"
+      sh -c "$coverage_cmd" < "$f" >/dev/null 2>&1 || true
+    ' _ "$COVERAGE_CMD"
 fi
 
 # ── replay crashes and timeouts ───────────────────────────────────────────────
@@ -229,15 +247,24 @@ fi
 CRASH_COUNT=$(count_files find_crash_timeout_files)
 if test "$CRASH_COUNT" -gt 0; then
   log "Replaying $CRASH_COUNT crash/timeout files (timeout=${TIMEOUT}s each)..."
-  while IFS= read -r -d '' f; do
-    logv "  $f"
-    if echo "$COVERAGE_CMD" | grep -q '@@'; then
-      CMD="${COVERAGE_CMD/@@/$f}"
-      timeout --signal=SIGTERM "${TIMEOUT}s" sh -c "$CMD" >/dev/null 2>&1 || true
-    else
-      timeout --signal=SIGTERM "${TIMEOUT}s" sh -c "$COVERAGE_CMD" < "$f" >/dev/null 2>&1 || true
-    fi
-  done < <(find_crash_timeout_files)
+  if echo "$COVERAGE_CMD" | grep -q '@@'; then
+    find_crash_timeout_files | xargs -0 -r -n 1 -P "$FORKS" \
+      bash -c '
+        coverage_cmd="$1"
+        timeout_secs="$2"
+        f="$3"
+        cmd="${coverage_cmd/@@/$f}"
+        timeout --signal=SIGTERM "${timeout_secs}s" sh -c "$cmd" >/dev/null 2>&1 || true
+      ' _ "$COVERAGE_CMD" "$TIMEOUT"
+  else
+    find_crash_timeout_files | xargs -0 -r -n 1 -P "$FORKS" \
+      bash -c '
+        coverage_cmd="$1"
+        timeout_secs="$2"
+        f="$3"
+        timeout --signal=SIGTERM "${timeout_secs}s" sh -c "$coverage_cmd" < "$f" >/dev/null 2>&1 || true
+      ' _ "$COVERAGE_CMD" "$TIMEOUT"
+  fi
 fi
 
 # ── check profraw files were generated ───────────────────────────────────────
