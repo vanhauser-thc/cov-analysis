@@ -144,6 +144,7 @@ emit_driver() {
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 
 int LLVMFuzzerInitialize(int *argc, char ***argv) __attribute__((weak));
@@ -732,9 +733,11 @@ cmd_stability() {
     if test -n "$unstable_lines"; then
       echo ""
       printf "~~ Variable-count lines (%d lines):\n" "$unstable_count"
-      echo "   Lines always executed but with varying hit counts:"
+      echo "   Lines with varying hit counts:"
       echo ""
       printf '%s\n' "$ranges"
+      echo ""
+      echo "[!] Unstable coverage detected."
     else
       echo ""
       echo "[+] All executed lines are perfectly stable."
