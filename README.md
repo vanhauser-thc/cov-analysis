@@ -11,6 +11,10 @@ Version: 1.0.0
   - [Step 3: Diff Two Coverage Reports](#step-3-diff-two-coverage-reports)
   - [Parallelized AFL Execution](#parallelized-afl-execution)
 - [Usage Information](#usage-information)
+  - [afl-cov report (default)](#afl-cov-report-default)
+  - [afl-cov build](#afl-cov-build)
+  - [afl-cov driver](#afl-cov-driver)
+  - [afl-cov diff](#afl-cov-diff)
 - [License](#license)
 
 ## Introduction
@@ -20,14 +24,14 @@ Version: 1.0.0
 This is a rewrite of the original afl-cov. Key changes in 1.0.0:
 - Replaced gcov/lcov/genhtml with LLVM source-based coverage (`-fprofile-instr-generate`, `llvm-profdata`, `llvm-cov`) - faster, more accurate under optimization
 - Rewritten in bash (was Python)
-- `afl-cov build` sets compiler flags and builds the target; `afl-cov build --driver` emits a ready-to-use `coverage_driver.c` for `LLVMFuzzerTestOneInput` harnesses
+- `afl-cov build` sets compiler flags and builds the target; `afl-cov driver` emits a ready-to-use `coverage_driver.c` for `LLVMFuzzerTestOneInput` harnesses
 - `afl-cov diff` generates an HTML diff report comparing coverage between two JSON exports
 
 ## Prerequisites
 
 - `clang` (any version down to 11)
 - `llvm-profdata` and `llvm-cov` (matching the clang version; auto-detected)
-- AFL++ (`afl-fuzz`) - only needed to produce the corpus, not to run `afl-cov`
+- AFL++ (`afl-fuzz`), libfuzzer, Honggfuzz - only needed to produce the corpus, not to run `afl-cov`
 
 ## Supported Fuzzers
 
@@ -68,7 +72,7 @@ LDFLAGS="-fprofile-instr-generate"
 Generate a replay driver and link it against your coverage-instrumented library:
 
 ```bash
-afl-cov build --driver -o coverage_driver.c
+afl-cov driver -o coverage_driver.c
 clang -fprofile-instr-generate -fcoverage-mapping \
   -c coverage_driver.c -o coverage_driver.o
 clang -fprofile-instr-generate \
@@ -90,11 +94,15 @@ To replay coverage with multiple workers, add `-t`:
 afl-cov -d /path/to/afl-fuzz-output/ -e "./cov @@" -t 8
 ```
 
-`afl-cov` will:
+`afl-cov` will for AFL++:
 1. Replay all `queue/id:*` files in batch (fast)
 2. Replay `crashes/id:*` and `timeouts/id:*` one-by-one with a timeout
 3. Merge `.profraw` profiles with `llvm-profdata`
 4. Generate reports in `/path/to/afl-fuzz-output/cov/`
+
+For libfuzzer/Honggfuzz `afl-cov` will:
+1. Replay all files in the directory
+2. Crash files are replayed one-by-one with a timeout
 
 Output:
 ```
@@ -180,15 +188,25 @@ Optional:
 
 ```
 Usage: afl-cov build <build-command> [args...]
-       afl-cov build --driver [-o output.c]
 
-Build mode:
   Sets CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS for LLVM source-based coverage and
   runs the given build command.
+```
 
-Driver mode (--driver):
+### afl-cov driver
+
+```
+Usage: afl-cov driver [-o output.c]
+
   Emits coverage_driver.c source to stdout (or to -o FILE).
   Use this for LLVMFuzzerTestOneInput harnesses to replay corpus files.
+
+  The driver loops over all file arguments, calls LLVMFuzzerTestOneInput
+  for each, and installs a crash handler that flushes profiling data so
+  crashing inputs still contribute to the coverage report.
+
+Options:
+  -o <file>     Write driver source to FILE instead of stdout
 ```
 
 ### afl-cov diff

@@ -219,6 +219,7 @@ Usage: afl-cov [command] [options]
 Commands:
   report      Generate coverage report from AFL++ corpus (DEFAULT)
   build       Build target with LLVM coverage instrumentation
+  driver      Emit coverage_driver.c for LLVMFuzzerTestOneInput harnesses
   diff        Compare coverage between two llvm-cov JSON exports
   stability   Analyze corpus stability and deduplication (not yet implemented)
 
@@ -283,9 +284,7 @@ EOF
 usage_build() {
   cat << 'EOF'
 Usage: afl-cov build <build-command> [args...]
-       afl-cov build --driver [-o output.c]
 
-Build mode:
   Sets CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS for LLVM source-based coverage and
   runs the given build command. Must be run once per build step, e.g.:
     afl-cov build ./configure --disable-shared
@@ -293,17 +292,32 @@ Build mode:
 
   Set CC/CXX environment variables to override the auto-detected clang.
 
-Driver mode (--driver):
-  Emits coverage_driver.c source to stdout (or to -o FILE).
-  Use this for LLVMFuzzerTestOneInput harnesses to replay corpus files.
-  Example:
-    afl-cov build --driver -o coverage_driver.c
-    clang -fprofile-instr-generate -fcoverage-mapping \
-      coverage_driver.c -L./build -ltarget -o cov
-
 Options:
   -h, --help    Show this help
   -V            Print version and exit
+EOF
+}
+
+usage_driver() {
+  cat << 'EOF'
+Usage: afl-cov driver [-o output.c]
+
+  Emits coverage_driver.c source to stdout (or to -o FILE).
+  Use this for LLVMFuzzerTestOneInput harnesses to replay corpus files.
+
+  The driver loops over all file arguments, calls LLVMFuzzerTestOneInput
+  for each, and installs a crash handler that flushes profiling data so
+  crashing inputs still contribute to the coverage report.
+
+Options:
+  -o <file>     Write driver source to FILE instead of stdout
+  -h, --help    Show this help
+  -V            Print version and exit
+
+Example:
+  afl-cov driver -o coverage_driver.c
+  clang -fprofile-instr-generate -fcoverage-mapping \
+    coverage_driver.c -L./build -ltarget -o cov
 EOF
 }
 
@@ -349,18 +363,6 @@ cmd_build() {
     -V)        echo "afl-cov-$VERSION"; exit 0 ;;
   esac
 
-  if test "$1" = "--driver"; then
-    shift
-    if test "${1-}" = "-o"; then
-      test -z "${2-}" && { echo "[-] -o requires a filename" >&2; exit 1; }
-      emit_driver > "$2"
-      echo "[+] coverage_driver.c written to: $2" >&2
-    else
-      emit_driver
-    fi
-    exit 0
-  fi
-
   # Build mode: refuse if an AFL++ compiler is already set
   echo " ${CC-} ${CXX-}" | grep -q afl && {
     err "AFL++ compiler is set in CC/CXX — unset it before building a coverage binary."
@@ -373,7 +375,7 @@ cmd_build() {
       export CC=clang
       export CXX=clang++
     else
-      for ver in 20 19 18 17 16 15 14 13 12 11; do
+      for ver in 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11; do
         if command -v "clang-$ver" >/dev/null 2>&1; then
           export CC="clang-$ver"
           export CXX="clang++-$ver"
@@ -395,6 +397,24 @@ cmd_build() {
   export LDFLAGS="-fprofile-instr-generate"
 
   exec "$@"
+}
+
+# ── command: driver ──────────────────────────────────────────────────────────
+
+cmd_driver() {
+  case "${1-}" in
+    -h|--help) usage_driver; exit 0 ;;
+    -V)        echo "afl-cov-$VERSION"; exit 0 ;;
+  esac
+
+  if test "${1-}" = "-o"; then
+    test -z "${2-}" && { err "-o requires a filename"; exit 1; }
+    emit_driver > "$2"
+    echo "[+] coverage_driver.c written to: $2" >&2
+  else
+    emit_driver
+  fi
+  exit 0
 }
 
 # ── command: stability (placeholder) ─────────────────────────────────────────
@@ -1149,11 +1169,12 @@ if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
   # Detect optional command; default to "report"
   COMMAND="report"
   case "$1" in
-    build|report|diff|stability) COMMAND="$1"; shift ;;
+    build|driver|report|diff|stability) COMMAND="$1"; shift ;;
   esac
 
   case "$COMMAND" in
     build)     cmd_build "$@" ;;
+    driver)    cmd_driver "$@" ;;
     report)    cmd_report "$@" ;;
     diff)      cmd_diff "$@" ;;
     stability) cmd_stability "$@" ;;
