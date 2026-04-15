@@ -74,10 +74,28 @@ detect_fuzzer_layout() {
   echo "empty"
 }
 
-# Emit null-delimited queue file paths across single and parallel AFL dirs.
+# Emit null-delimited queue/corpus file paths for the detected layout.
+# Reads globals: AFL_DIR, FUZZER_LAYOUT
 find_queue_files() {
-  find "$AFL_DIR/queue" "$AFL_DIR"/*/queue \
-    -name 'id:*' -print0 2>/dev/null || true
+  case "${FUZZER_LAYOUT:-afl}" in
+    afl)
+      find "$AFL_DIR/queue" "$AFL_DIR"/*/queue \
+        -name 'id:*' -print0 2>/dev/null || true
+      ;;
+    flat)
+      # libFuzzer/honggfuzz flat corpus: every regular file that isn't a
+      # known crash artifact or metadata file.
+      find "$AFL_DIR" -maxdepth 1 -type f \
+        ! -name 'crash-*' \
+        ! -name 'leak-*' \
+        ! -name 'oom-*' \
+        ! -name 'timeout-*' \
+        ! -name 'slow-unit-*' \
+        ! -name 'SIG*.fuzz' \
+        ! -name 'HONGGFUZZ.REPORT.TXT' \
+        -print0 2>/dev/null || true
+      ;;
+  esac
 }
 
 # Emit null-delimited crash/timeout file paths across all AFL dirs.
