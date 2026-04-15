@@ -1,5 +1,7 @@
 # cov-analysis - Fuzzing Code Coverage for AFL++, libFuzzer, and honggfuzz
 
+Replacing `afl-cov` and `libfuzzer-cov` with modern coverage gathering and great features!
+
 Version: 1.0.0
 
 - [Introduction](#introduction)
@@ -24,16 +26,18 @@ Version: 1.0.0
 `cov-analysis` generates **LLVM source-based code coverage** reports from a fuzzing corpus. It auto-detects the on-disk layout used by [AFL++](https://github.com/AFLplusplus/AFLplusplus) (queue/crashes/timeouts directories, single or parallel), libFuzzer (flat corpus dir plus `crash-*`/`leak-*`/`oom-*` artifacts), and honggfuzz (flat corpus plus `SIG*.fuzz` crash files). It replays each input through a coverage-instrumented binary, merges the raw profiles, and produces HTML, text, and JSON reports via `llvm-profdata` and `llvm-cov`.
 
 This is a rewrite of the original cov-analysis. Key changes in 1.0.0:
+- New key feature: generate a diff report on coverage to a previous run
+- New key feature: identify the lines in the code that are unstable (EXPLAIN HERE)
 - Replaced gcov/lcov/genhtml with LLVM source-based coverage (`-fprofile-instr-generate`, `llvm-profdata`, `llvm-cov`) - faster, more accurate under optimization
-- Rewritten in bash (was Python)
 - `cov-analysis build` sets compiler flags and builds the target; `cov-analysis driver` emits a ready-to-use `coverage_driver.c` for `LLVMFuzzerTestOneInput` harnesses
 - `cov-analysis diff` generates an HTML diff report comparing coverage between two JSON exports
+- Rewritten in bash (was Python)
 
 ## Prerequisites
 
 - `clang` (any version down to 11)
 - `llvm-profdata` and `llvm-cov` (matching the clang version; auto-detected)
-- AFL++ (`afl-fuzz`), libfuzzer, Honggfuzz - only needed to produce the corpus, not to run `cov-analysis`
+- AFL++ (`afl-fuzz`), libafl, libfuzzer, Honggfuzz, ... - only needed to produce the corpus, not to run `cov-analysis`
 
 ## Supported Fuzzers
 
@@ -41,9 +45,10 @@ This is a rewrite of the original cov-analysis. Key changes in 1.0.0:
 |------------|--------------------------------------------|-------------------------------------------------------------------------------|
 | AFL++      | `<dir>/queue/` or `<dir>/*/queue/` exists  | `queue/id:*`, `crashes/id:*`, `timeouts/id:*`                                 |
 | libFuzzer  | flat directory of files, no `queue/`       | all files except `crash-*`/`leak-*`/`oom-*`/`timeout-*`/`slow-unit-*`        |
+| libafl     | flat directory of files, no `queue/`       | all files except `crash-*`/`leak-*`/`oom-*`/`timeout-*`/`slow-unit-*`        |
 | honggfuzz  | flat directory of files, no `queue/`       | all files except `SIG*.fuzz` and `HONGGFUZZ.REPORT.TXT`                       |
 
-For libFuzzer and honggfuzz, crash-like files (above) are still replayed, but under the `-T` timeout so a hanging input can't stall the run.
+For libFuzzer, libafl and honggfuzz, crash-like files (above) are still replayed, but under the `-T` timeout so a hanging input can't stall the run.
 
 Override auto-detection with `--layout afl|flat`.
 

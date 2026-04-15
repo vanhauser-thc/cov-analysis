@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#  File: afl-cov
+#  File: cov-analysis
 #
 #  Version: 1.0.0
 #
@@ -60,7 +60,7 @@ extract_binary() {
 
 # Classify $AFL_DIR as one of:
 #   afl    — AFL++ layout: <dir>/queue or <dir>/*/queue exists
-#   flat   — libFuzzer/honggfuzz flat corpus or crash dir (≥1 regular file)
+#   flat   — libFuzzer/libafl/honggfuzz flat corpus or crash dir (≥1 regular file)
 #   empty  — directory is empty or unreadable
 detect_fuzzer_layout() {
   if test -d "$AFL_DIR/queue"; then
@@ -84,7 +84,7 @@ find_queue_files() {
         -name 'id:*' -print0 2>/dev/null || true
       ;;
     flat)
-      # libFuzzer/honggfuzz flat corpus: every regular file that isn't a
+      # libFuzzer/libafl/honggfuzz flat corpus: every regular file that isn't a
       # known crash artifact or metadata file.
       find "$AFL_DIR" -maxdepth 1 -type f \
         ! -name 'crash-*' \
@@ -215,7 +215,7 @@ DRIVER_EOF
 
 usage_main() {
   cat << 'EOF'
-Usage: afl-cov [command] [options]
+Usage: cov-analysis [command] [options]
 
 Commands:
   report      Generate coverage report from AFL++ corpus (DEFAULT)
@@ -224,7 +224,7 @@ Commands:
   diff        Compare coverage between two llvm-cov JSON exports
   stability   Analyze corpus stability and deduplication (not yet implemented)
 
-Run 'afl-cov <command> --help' for command-specific options.
+Run 'cov-analysis <command> --help' for command-specific options.
 
 Global options:
   -V          Print version and exit
@@ -239,10 +239,10 @@ EOF
 
 usage_report() {
   cat << 'EOF'
-Usage: afl-cov [report] [options]
+Usage: cov-analysis [report] [options]
 
 Required:
-  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, or honggfuzz)
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
               Omit @@ to feed input via stdin instead.
 
@@ -260,36 +260,39 @@ Optional:
 
 Examples:
   # Standard AFL++ replay with file-based input
-  afl-cov -d out -e "./cov @@"
+  cov-analysis -d out -e "./cov @@"
 
   # With env vars, custom report dir, 1s timeout
-  afl-cov -d out -e "LD_LIBRARY_PATH=./lib ./cov @@" -o coverage -T 1
+  cov-analysis -d out -e "LD_LIBRARY_PATH=./lib ./cov @@" -o coverage -T 1
 
   # Replay coverage with 8 parallel workers
-  afl-cov -d out -e "./cov @@" -t 8
+  cov-analysis -d out -e "./cov @@" -t 8
 
   # stdin input (binary reads from stdin)
-  afl-cov -d out -e "./cov"
+  cov-analysis -d out -e "./cov"
 
   # Exclude test files and system headers from report
-  afl-cov -d out -e "./cov @@" --ignore-regex '(/usr/include/|/test/)'
+  cov-analysis -d out -e "./cov @@" --ignore-regex '(/usr/include/|/test/)'
 
   # libFuzzer corpus (flat directory of corpus files)
-  afl-cov -d ./corpus -e "./cov @@"
+  cov-analysis -d ./corpus -e "./cov @@"
+
+  # libafl corpus (flat directory of corpus files), stdin method
+  cov-analysis -d ./corpus -e "./cov"
 
   # honggfuzz workspace (corpus + SIG*.fuzz crash files)
-  afl-cov -d ./hfuzz-workdir -e "./cov @@"
+  cov-analysis -d ./hfuzz-workdir -e "./cov @@"
 EOF
 }
 
 usage_build() {
   cat << 'EOF'
-Usage: afl-cov build <build-command> [args...]
+Usage: cov-analysis build <build-command> [args...]
 
   Sets CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS for LLVM source-based coverage and
   runs the given build command. Must be run once per build step, e.g.:
-    afl-cov build ./configure --disable-shared
-    afl-cov build make -j$(nproc)
+    cov-analysis build ./configure --disable-shared
+    cov-analysis build make -j$(nproc)
 
   Set CC/CXX environment variables to override the auto-detected clang.
 
@@ -301,7 +304,7 @@ EOF
 
 usage_driver() {
   cat << 'EOF'
-Usage: afl-cov driver [-o output.c]
+Usage: cov-analysis driver [-o output.c]
 
   Emits coverage_driver.c source to stdout (or to -o FILE).
   Use this for LLVMFuzzerTestOneInput harnesses to replay corpus files.
@@ -316,7 +319,7 @@ Options:
   -V            Print version and exit
 
 Example:
-  afl-cov driver -o coverage_driver.c
+  cov-analysis driver -o coverage_driver.c
   clang -fprofile-instr-generate -fcoverage-mapping \
     coverage_driver.c -L./build -ltarget -o cov
 EOF
@@ -324,7 +327,7 @@ EOF
 
 usage_diff() {
   cat << 'EOF'
-Usage: afl-cov diff [<OLD_JSON> <NEW_JSON>]
+Usage: cov-analysis diff [<OLD_JSON> <NEW_JSON>]
 
   Compare coverage between two llvm-cov JSON exports and generate an
   HTML diff report showing newly covered, lost, and still-uncovered
@@ -343,7 +346,7 @@ EOF
 
 usage_stability() {
   cat << 'EOF'
-Usage: afl-cov stability [options]
+Usage: cov-analysis stability [options]
 
   Run each corpus input N times with LLVM coverage, collect per-line hit
   counts, and flag lines where counts vary across runs as "unstable."
@@ -351,7 +354,7 @@ Usage: afl-cov stability [options]
   4 runs, reruns for a total of 8 to confirm.
 
 Required:
-  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, or honggfuzz)
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libaf, or honggfuzz)
   -e <cmd>    Coverage command. Use @@ as input file placeholder.
               Omit @@ to feed input via stdin instead.
 
@@ -367,9 +370,9 @@ Optional:
   -h, --help         Print this help and exit
 
 Examples:
-  afl-cov stability -d out -e "./cov @@"
-  afl-cov stability -d out -e "./cov @@" -n 8 -s src/
-  afl-cov stability -d ./corpus -e "./cov @@" -t 4
+  cov-analysis stability -d out -e "./cov @@"
+  cov-analysis stability -d out -e "./cov @@" -n 8 -s src/
+  cov-analysis stability -d ./corpus -e "./cov @@" -t 4
 EOF
 }
 
@@ -379,7 +382,7 @@ cmd_build() {
   if test $# -eq 0; then usage_build; exit 1; fi
   case "$1" in
     -h|--help) usage_build; exit 0 ;;
-    -V)        echo "afl-cov-$VERSION"; exit 0 ;;
+    -V)        echo "cov-analysis-$VERSION"; exit 0 ;;
   esac
 
   # Build mode: refuse if an AFL++ compiler is already set
@@ -423,7 +426,7 @@ cmd_build() {
 cmd_driver() {
   case "${1-}" in
     -h|--help) usage_driver; exit 0 ;;
-    -V)        echo "afl-cov-$VERSION"; exit 0 ;;
+    -V)        echo "cov-analysis-$VERSION"; exit 0 ;;
   esac
 
   if test "${1-}" = "-o"; then
@@ -461,7 +464,7 @@ cmd_stability() {
       -t)        FORKS="$2";                    shift 2 ;;
       -v)        VERBOSE=1;                     shift   ;;
       -q)        QUIET=1;                       shift   ;;
-      -V)        echo "afl-cov-$VERSION"; exit 0 ;;
+      -V)        echo "cov-analysis-$VERSION"; exit 0 ;;
       -h|--help) usage_stability; exit 0 ;;
       --layout)  FUZZER_LAYOUT="$2";            shift 2 ;;
       *) err "Unknown option: $1"; echo "" >&2; usage_stability >&2; exit 1 ;;
@@ -529,17 +532,17 @@ cmd_stability() {
   fi
   case "$FUZZER_LAYOUT" in
     afl)   log "Fuzzer layout   : AFL++ (queue/crashes/timeouts)" ;;
-    flat)  log "Fuzzer layout   : flat (libFuzzer / honggfuzz)" ;;
+    flat)  log "Fuzzer layout   : flat (libFuzzer/libafl/honggfuzz)" ;;
     empty)
       err "No input files found in $AFL_DIR"
-      err "Expected one of: AFL++ out dir, libFuzzer corpus, honggfuzz workspace."
+      err "Expected one of: AFL++ out dir, libFuzzer/libafl corpus, honggfuzz workspace."
       err "Override detection with --layout afl|flat if needed."
       exit 1
       ;;
   esac
 
   # ── prepare workspace ──────────────────────────────────────────────────────
-  STAB_DIR="$(mktemp -d /tmp/afl-cov-stability.XXXXXX)"
+  STAB_DIR="$(mktemp -d /tmp/cov-analysis-stability.XXXXXX)"
   trap "rm -rf '$STAB_DIR'" EXIT INT TERM
 
   local CORPUS_SIZE
@@ -589,7 +592,7 @@ cmd_stability() {
     if test "$profraw_count" -eq 0; then
       err "No .profraw files generated in pass $idx."
       err "Check that the binary is instrumented with -fprofile-instr-generate."
-      err "Use 'afl-cov build' to build the coverage binary."
+      err "Use 'cov-analysis build' to build the coverage binary."
       exit 1
     fi
     logv "Pass $idx: merging $profraw_count profraw file(s)..."
@@ -752,7 +755,7 @@ cmd_diff() {
   case "${1-}" in
     -o)        REPORT_DIR="$2"; shift 2 ;;
     -h|--help) usage_diff; exit 0 ;;
-    -V)        echo "afl-cov-$VERSION"; exit 0 ;;
+    -V)        echo "cov-analysis-$VERSION"; exit 0 ;;
   esac
   local OLD="${1-}"
   local NEW="${2-}"
@@ -1232,7 +1235,7 @@ cmd_report() {
       -T)            TIMEOUT="$2";       shift 2 ;;
       -v)            VERBOSE=1;          shift   ;;
       -q)            QUIET=1;            shift   ;;
-      -V)            echo "afl-cov-$VERSION"; exit 0 ;;
+      -V)            echo "cov-analysis-$VERSION"; exit 0 ;;
       -h|--help)     usage_report; exit 0 ;;
       --ignore-regex) IGNORE_REGEX="$2"; shift 2 ;;
       --layout)      FUZZER_LAYOUT="$2";  shift 2 ;;
@@ -1242,7 +1245,7 @@ cmd_report() {
 
   # ── validate inputs ────────────────────────────────────────────────────────
   if test -z "$AFL_DIR"; then
-    err "Must specify input directory with -d (AFL++, libFuzzer, or honggfuzz)"
+    err "Must specify input directory with -d (AFL++, libFuzzer, libafl, libafl, or honggfuzz)"
     exit 1
   fi
   if test -z "$COVERAGE_CMD"; then
@@ -1300,17 +1303,17 @@ cmd_report() {
   fi
   case "$FUZZER_LAYOUT" in
     afl)  log "Fuzzer layout   : AFL++ (queue/crashes/timeouts)" ;;
-    flat) log "Fuzzer layout   : flat (libFuzzer / honggfuzz)" ;;
+    flat) log "Fuzzer layout   : flat (libFuzzer/libafl/honggfuzz)" ;;
     empty)
       err "No input files found in $AFL_DIR"
-      err "Expected one of: AFL++ out dir, libFuzzer corpus, honggfuzz workspace."
+      err "Expected one of: AFL++ out dir, libFuzzer/libafl corpus, honggfuzz workspace."
       err "Override detection with --layout afl|flat if needed."
       exit 1
       ;;
   esac
 
   # ── prepare workspace ──────────────────────────────────────────────────────
-  PROFRAW_DIR="$(mktemp -d /tmp/afl-cov-profraw.XXXXXX)"
+  PROFRAW_DIR="$(mktemp -d /tmp/cov-analysis-profraw.XXXXXX)"
   trap "rm -rf '$PROFRAW_DIR'" EXIT INT TERM
 
   rm -rf "$REPORT_DIR/html" "$REPORT_DIR/text"
@@ -1396,7 +1399,7 @@ cmd_report() {
   if test "$PROFRAW_COUNT" -eq 0; then
     err "No .profraw files generated."
     err "Check that the binary is instrumented with -fprofile-instr-generate."
-    err "Use 'afl-cov build' to build the coverage binary."
+    err "Use 'cov-analysis build' to build the coverage binary."
     exit 1
   fi
   logv "Generated $PROFRAW_COUNT .profraw file(s)"
@@ -1483,7 +1486,7 @@ if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
 
   # Global flags before command detection
   case "$1" in
-    -V) echo "afl-cov-$VERSION"; exit 0 ;;
+    -V) echo "cov-analysis-$VERSION"; exit 0 ;;
     -h|--help) usage_main; exit 0 ;;
   esac
 
