@@ -57,6 +57,23 @@ extract_binary() {
   return 1
 }
 
+# Classify $AFL_DIR as one of:
+#   afl    — AFL++ layout: <dir>/queue or <dir>/*/queue exists
+#   flat   — libFuzzer/honggfuzz flat corpus or crash dir (≥1 regular file)
+#   empty  — directory is empty or unreadable
+detect_fuzzer_layout() {
+  if test -d "$AFL_DIR/queue"; then
+    echo "afl"; return 0
+  fi
+  if compgen -G "$AFL_DIR/*/queue" >/dev/null 2>&1; then
+    echo "afl"; return 0
+  fi
+  if find "$AFL_DIR" -maxdepth 1 -type f -print -quit 2>/dev/null | grep -q .; then
+    echo "flat"; return 0
+  fi
+  echo "empty"
+}
+
 # Emit null-delimited queue file paths across single and parallel AFL dirs.
 find_queue_files() {
   find "$AFL_DIR/queue" "$AFL_DIR"/*/queue \
