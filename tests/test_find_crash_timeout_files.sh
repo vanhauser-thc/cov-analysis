@@ -4,7 +4,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 source tests/lib.sh
-source ./afl-cov
+source ./cov-analysis
 
 trap 'rm -rf "$TMP"' EXIT
 TMP=$(mktmp)

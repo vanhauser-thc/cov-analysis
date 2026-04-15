@@ -344,13 +344,31 @@ usage_stability() {
   cat << 'EOF'
 Usage: afl-cov stability [options]
 
-  NOT YET IMPLEMENTED
+  Run each corpus input N times with LLVM coverage, collect per-line hit
+  counts, and flag lines where counts vary across runs as "unstable."
+  Reports a stability percentage. If instability is found with the default
+  4 runs, reruns for a total of 8 to confirm.
 
-  Will analyze corpus stability, identify duplicate inputs, and report
-  on coverage contribution per corpus entry.
+Required:
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, or honggfuzz)
+  -e <cmd>    Coverage command. Use @@ as input file placeholder.
+              Omit @@ to feed input via stdin instead.
 
-Options:
-  -h, --help  Print this help and exit
+Optional:
+  -n <num>           Number of runs per corpus pass (default: 4)
+  -s <prefix>        Only consider source lines whose file path contains
+                     this prefix (e.g. -s src/)
+  -t <num>           Parallel replay workers (default: 1)
+  --layout <kind>    Force layout: 'afl' or 'flat' (default: auto-detect)
+  -v                 Verbose output
+  -q                 Quiet mode (suppress all [+] output)
+  -V                 Print version and exit
+  -h, --help         Print this help and exit
+
+Examples:
+  afl-cov stability -d out -e "./cov @@"
+  afl-cov stability -d out -e "./cov @@" -n 8 -s src/
+  afl-cov stability -d ./corpus -e "./cov @@" -t 4
 EOF
 }
 
@@ -417,15 +435,311 @@ cmd_driver() {
   exit 0
 }
 
-# ── command: stability (placeholder) ─────────────────────────────────────────
+# ── command: stability ───────────────────────────────────────────────────────
 
 cmd_stability() {
-  case "${1-}" in
-    -h|--help) usage_diff; exit 0 ;;
-    -V)        echo "afl-cov-$VERSION"; exit 0 ;;
+  local AFL_DIR=""
+  local COVERAGE_CMD=""
+  local RUNS=4
+  local SOURCE_FILTER=""
+  local FORKS=1
+  local LLVM_PROFDATA=""
+  local LLVM_COV=""
+  local STAB_DIR=""
+  local COV_BINARY=""
+  local USER_RUNS=""   # set if -n was explicitly provided
+
+  if test $# -eq 0; then usage_stability; exit 1; fi
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -d)        AFL_DIR="$2";                  shift 2 ;;
+      -e)        COVERAGE_CMD="$2";             shift 2 ;;
+      -n)        RUNS="$2"; USER_RUNS="1";      shift 2 ;;
+      -s)        SOURCE_FILTER="$2";            shift 2 ;;
+      -t)        FORKS="$2";                    shift 2 ;;
+      -v)        VERBOSE=1;                     shift   ;;
+      -q)        QUIET=1;                       shift   ;;
+      -V)        echo "afl-cov-$VERSION"; exit 0 ;;
+      -h|--help) usage_stability; exit 0 ;;
+      --layout)  FUZZER_LAYOUT="$2";            shift 2 ;;
+      *) err "Unknown option: $1"; echo "" >&2; usage_stability >&2; exit 1 ;;
+    esac
+  done
+
+  # ── validate inputs ────────────────────────────────────────────────────────
+  if test -z "$AFL_DIR"; then
+    err "Must specify input directory with -d"
+    exit 1
+  fi
+  if test -z "$COVERAGE_CMD"; then
+    err "Must specify coverage command with -e"
+    exit 1
+  fi
+  if ! test -d "$AFL_DIR"; then
+    err "Input directory does not exist: $AFL_DIR"
+    exit 1
+  fi
+  case "$RUNS" in
+    ''|*[!0-9]*|0|1)
+      err "Run count (-n) must be a positive integer >= 2: $RUNS"
+      exit 1
+      ;;
   esac
-  err "The 'stability' command is not yet implemented."
-  exit 1
+  case "$FORKS" in
+    ''|*[!0-9]*|0)
+      err "Replay worker count must be a positive integer: $FORKS"
+      exit 1
+      ;;
+  esac
+
+  if test -n "$FUZZER_LAYOUT"; then
+    case "$FUZZER_LAYOUT" in
+      afl|flat) ;;
+      *) err "--layout must be 'afl' or 'flat' (got '$FUZZER_LAYOUT')"; exit 1 ;;
+    esac
+  fi
+
+  COV_BINARY="$(extract_binary "$COVERAGE_CMD")"
+  if test -z "$COV_BINARY"; then
+    err "Could not extract binary path from coverage command: $COVERAGE_CMD"
+    exit 1
+  fi
+  if ! test -x "$COV_BINARY"; then
+    err "Coverage binary not found or not executable: $COV_BINARY"
+    exit 1
+  fi
+  logv "Coverage binary : $COV_BINARY"
+
+  # ── detect LLVM tools ──────────────────────────────────────────────────────
+  LLVM_PROFDATA="$(find_tool llvm-profdata)" || {
+    err "llvm-profdata not found. Install LLVM (apt install llvm / dnf install llvm)."
+    exit 1
+  }
+  LLVM_COV="$(find_tool llvm-cov)" || {
+    err "llvm-cov not found. Install LLVM (apt install llvm / dnf install llvm)."
+    exit 1
+  }
+  log "LLVM tools      : $LLVM_PROFDATA, $LLVM_COV"
+
+  # ── detect or honor fuzzer layout ──────────────────────────────────────────
+  if test -z "$FUZZER_LAYOUT"; then
+    FUZZER_LAYOUT="$(detect_fuzzer_layout)"
+  fi
+  case "$FUZZER_LAYOUT" in
+    afl)   log "Fuzzer layout   : AFL++ (queue/crashes/timeouts)" ;;
+    flat)  log "Fuzzer layout   : flat (libFuzzer / honggfuzz)" ;;
+    empty)
+      err "No input files found in $AFL_DIR"
+      err "Expected one of: AFL++ out dir, libFuzzer corpus, honggfuzz workspace."
+      err "Override detection with --layout afl|flat if needed."
+      exit 1
+      ;;
+  esac
+
+  # ── prepare workspace ──────────────────────────────────────────────────────
+  STAB_DIR="$(mktemp -d /tmp/afl-cov-stability.XXXXXX)"
+  trap "rm -rf '$STAB_DIR'" EXIT INT TERM
+
+  local CORPUS_SIZE
+  CORPUS_SIZE=$(count_files find_queue_files)
+  if test "$CORPUS_SIZE" -eq 0; then
+    err "No corpus files found in $AFL_DIR"
+    exit 1
+  fi
+
+  log "Input directory : $AFL_DIR"
+  log "Corpus size     : $CORPUS_SIZE inputs"
+  log "Coverage binary : $COV_BINARY"
+  log "Runs            : $RUNS"
+  test -n "$SOURCE_FILTER" && log "Source filter   : $SOURCE_FILTER"
+
+  # ── per-run coverage collection ────────────────────────────────────────────
+  # Collect one pass: replay all corpus, merge profraw, export LCOV, parse hits.
+  # Accepts run index as $1; reads globals COVERAGE_CMD, FORKS, STAB_DIR,
+  # COV_BINARY, SOURCE_FILTER, LLVM_PROFDATA, LLVM_COV, RUNS.
+  _stab_collect_pass() {
+    local idx="$1"
+    local run_dir="$STAB_DIR/run_${idx}"
+    mkdir -p "$run_dir"
+
+    log "Collecting pass $idx/$RUNS..."
+    export LLVM_PROFILE_FILE="$run_dir/cov-%p.profraw"
+
+    if echo "$COVERAGE_CMD" | grep -q '@@'; then
+      find_queue_files | xargs -0 -r -n 1 -P "$FORKS" \
+        bash -c '
+          coverage_cmd="$1"
+          f="$2"
+          cmd="${coverage_cmd/@@/$f}"
+          sh -c "$cmd" >/dev/null 2>&1 || true
+        ' _ "$COVERAGE_CMD"
+    else
+      find_queue_files | xargs -0 -r -n 1 -P "$FORKS" \
+        bash -c '
+          coverage_cmd="$1"
+          f="$2"
+          sh -c "$coverage_cmd" < "$f" >/dev/null 2>&1 || true
+        ' _ "$COVERAGE_CMD"
+    fi
+
+    local profraw_count
+    profraw_count=$(find "$run_dir" -name '*.profraw' 2>/dev/null | wc -l)
+    if test "$profraw_count" -eq 0; then
+      err "No .profraw files generated in pass $idx."
+      err "Check that the binary is instrumented with -fprofile-instr-generate."
+      err "Use 'afl-cov build' to build the coverage binary."
+      exit 1
+    fi
+    logv "Pass $idx: merging $profraw_count profraw file(s)..."
+
+    "$LLVM_PROFDATA" merge -sparse "$run_dir"/*.profraw \
+      -o "$STAB_DIR/merged_run_${idx}.profdata" 2>/dev/null || {
+      err "llvm-profdata merge failed for pass $idx"
+      exit 1
+    }
+
+    logv "Pass $idx: exporting LCOV..."
+    "$LLVM_COV" export "$COV_BINARY" \
+      --format=lcov \
+      "-instr-profile=$STAB_DIR/merged_run_${idx}.profdata" \
+      > "$STAB_DIR/run_${idx}.lcov" 2>/dev/null || {
+      err "llvm-cov export (lcov) failed for pass $idx."
+      err "LCOV export requires LLVM 12 or later."
+      exit 1
+    }
+
+    logv "Pass $idx: parsing hit counts..."
+    awk -v filter="$SOURCE_FILTER" '
+      /^SF:/ { file = substr($0, 4) }
+      /^DA:/ {
+        if (filter != "" && index(file, filter) == 0) next
+        split(substr($0, 4), a, ",")
+        print file ":" a[1] "\t" a[2]
+      }
+    ' "$STAB_DIR/run_${idx}.lcov" | sort > "$STAB_DIR/run_${idx}.hits"
+  }
+
+  local run_idx
+  for run_idx in $(seq 1 "$RUNS"); do
+    _stab_collect_pass "$run_idx"
+  done
+
+  # ── stability analysis ─────────────────────────────────────────────────────
+  # Reads $1 hit files (run_1.hits .. run_N.hits) from $STAB_DIR.
+  # Uses gawk ARGIND to track which file each record belongs to.
+  # Outputs: one "file:linenum" per unstable line, then "STABILITY_STATS S T".
+  _stab_analyze() {
+    local n="$1"
+    local hit_files=()
+    local i
+    for i in $(seq 1 "$n"); do
+      hit_files+=("$STAB_DIR/run_${i}.hits")
+    done
+    awk -v n="$n" '
+      { counts[$1][ARGIND] = $2 }
+      END {
+        total = 0; stable_count = 0
+        for (key in counts) {
+          total++
+          ref = (1 in counts[key]) ? counts[key][1] : ""
+          stable = 1
+          for (i = 2; i <= n; i++) {
+            val = (i in counts[key]) ? counts[key][i] : ""
+            if (val != ref) { stable = 0; break }
+          }
+          if (stable) { stable_count++ }
+          else { print key }
+        }
+        printf "STABILITY_STATS %d %d\n", stable_count, total
+      }
+    ' "${hit_files[@]}"
+  }
+
+  log "Analyzing stability across $RUNS runs..."
+  local analysis_out
+  analysis_out="$(_stab_analyze "$RUNS")"
+
+  local stable_count total_lines unstable_lines
+  stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
+  total_lines=$(printf '%s\n'  "$analysis_out" | awk '/^STABILITY_STATS/{print $3}')
+  unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V)"
+
+  # ── extend to double the runs if instability found (default -n only) ───────
+  if test -n "$unstable_lines" && test -z "$USER_RUNS"; then
+    local extra_end=$((RUNS * 2))
+    log "Instability detected, extending from $RUNS to $extra_end runs..."
+    for run_idx in $(seq $((RUNS + 1)) "$extra_end"); do
+      _stab_collect_pass "$run_idx"
+    done
+    RUNS="$extra_end"
+
+    log "Re-analyzing stability across $RUNS runs..."
+    analysis_out="$(_stab_analyze "$RUNS")"
+    stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
+    total_lines=$(printf '%s\n'  "$analysis_out" | awk '/^STABILITY_STATS/{print $3}')
+    unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V)"
+  fi
+
+  # ── collapse consecutive unstable lines into ranges ────────────────────────
+  local ranges=""
+  if test -n "$unstable_lines"; then
+    ranges="$(printf '%s\n' "$unstable_lines" | awk '
+      BEGIN { prev_file = ""; prev_line = -999; range_start = -999 }
+      {
+        n = split($0, parts, ":")
+        linenum = parts[n] + 0
+        file = $0; sub(":" parts[n] "$", "", file)
+
+        if (file != prev_file || linenum != prev_line + 1) {
+          if (prev_file != "") {
+            if (range_start == prev_line) printf "  %s:%d\n", prev_file, range_start
+            else printf "  %s:%d-%d\n", prev_file, range_start, prev_line
+          }
+          prev_file = file
+          range_start = linenum
+        }
+        prev_line = linenum
+      }
+      END {
+        if (prev_file != "") {
+          if (range_start == prev_line) printf "  %s:%d\n", prev_file, range_start
+          else printf "  %s:%d-%d\n", prev_file, range_start, prev_line
+        }
+      }
+    ')"
+  fi
+
+  # ── print report ───────────────────────────────────────────────────────────
+  local unstable_count=$((total_lines - stable_count))
+  local pct
+  if test "$total_lines" -gt 0; then
+    pct="$(awk -v s="$stable_count" -v t="$total_lines" \
+      'BEGIN { printf "%.1f", 100.0 * s / t }')"
+  else
+    pct="n/a"
+  fi
+
+  if test "$QUIET" -eq 0; then
+    echo ""
+    echo "Stability Report"
+    echo "--------------------------------------------------------"
+    printf "Corpus size : %s inputs\n" "$CORPUS_SIZE"
+    printf "Runs        : %s\n"        "$RUNS"
+    printf "Stability   : %s%% (%d/%d executed lines stable)\n" \
+      "$pct" "$stable_count" "$total_lines"
+
+    if test -n "$unstable_lines"; then
+      echo ""
+      printf "~~ Variable-count lines (%d lines):\n" "$unstable_count"
+      echo "   Lines always executed but with varying hit counts:"
+      echo ""
+      printf '%s\n' "$ranges"
+    else
+      echo ""
+      echo "[+] All executed lines are perfectly stable."
+    fi
+  fi
 }
 
 # ── command: diff ────────────────────────────────────────────────────────────
